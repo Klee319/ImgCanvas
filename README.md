@@ -405,6 +405,73 @@ src/
 - ✅ メモリ効率向上
 - ✅ エラーハンドリング強化
 
-## �� ライセンス
+## 🛡️ ライセンス
 
 MIT License
+
+## 🚀 GitHub Pagesへのデプロイ
+
+### 1. GitHubリポジトリの作成
+
+1. GitHubで新しいリポジトリを作成: `imgBoard`
+2. リポジトリをpublicに設定（GitHub Pages無料プランの場合）
+
+### 2. リモートリポジトリの追加
+
+```bash
+git remote add origin https://github.com/YOUR_USERNAME/imgBoard.git
+git push -u origin main
+```
+
+### 3. GitHub Pagesの設定
+
+1. GitHubリポジトリの「Settings」タブを開く
+2. 左サイドバーの「Pages」をクリック
+3. Source: 「Deploy from a branch」を選択
+4. Branch: 「gh-pages」を選択
+5. 「Save」をクリック
+
+### 4. デプロイの実行
+
+```bash
+npm run deploy
+```
+
+### 5. デプロイ完了
+
+- デプロイ後、`https://YOUR_USERNAME.github.io/imgBoard/` でアクセス可能
+- 変更を反映する場合は `npm run deploy` を再実行
+
+### 注意事項
+
+- **HTTPS必須**: クリップボード機能はHTTPS環境でのみ動作
+- **初回デプロイ**: 5-10分程度で反映される場合があります
+- **カスタムドメイン**: 独自ドメインの設定も可能
+
+### 自動デプロイ（GitHub Actions）
+
+より高度な設定として、GitHub Actionsによる自動デプロイも可能です：
+
+```yaml
+# .github/workflows/deploy.yml
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-node@v3
+        with:
+          node-version: 18
+      - run: npm ci
+      - run: npm run build
+      - uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./dist
+```
