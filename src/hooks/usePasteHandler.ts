@@ -38,9 +38,10 @@ export const usePasteHandler = () => {
       const canvas = document.getElementById('image-canvas');
       const canvasRect = canvas?.getBoundingClientRect();
 
-      // デフォルトのキャンバスサイズ
-      const canvasWidth = canvasRect ? canvasRect.width : 800;
-      const canvasHeight = canvasRect ? canvasRect.height : 600;
+      // デフォルトのキャンバスサイズ（選択フレーム考慮）
+      const safetyMargin = 8; // ring-offset-2 (4px) + 余裕 (4px)
+      const canvasWidth = canvasRect ? canvasRect.width - safetyMargin : 792;
+      const canvasHeight = canvasRect ? canvasRect.height - safetyMargin : 592;
 
       // キャンバスの中央を基準点とする
       const centerX = canvasWidth / 2;
@@ -85,14 +86,19 @@ export const usePasteHandler = () => {
     [state.images]
   );
 
-  // 画像サイズの自動調整
+  // 画像サイズの自動調整（動的キャンバスサイズ対応）
   const adjustImageSize = useCallback(
     (originalWidth: number, originalHeight: number) => {
-      const maxWidth = 800;
-      const maxHeight = 600;
+      // 動的にキャンバスサイズを取得
+      const canvas = document.getElementById('image-canvas');
+      const canvasRect = canvas?.getBoundingClientRect();
+      
+      const maxWidth = canvasRect ? canvasRect.width * 0.9 : 720; // キャンバスの90%
+      const maxHeight = canvasRect ? canvasRect.height * 0.9 : 540; // キャンバスの90%
 
       let width = originalWidth;
       let height = originalHeight;
+      let wasResized = false;
 
       // 大きすぎる場合は縮小
       if (width > maxWidth || height > maxHeight) {
@@ -102,9 +108,20 @@ export const usePasteHandler = () => {
 
         width = width * ratio;
         height = height * ratio;
+        wasResized = true;
+        
+        // アラート表示（非同期で表示してUXを阻害しない）
+        setTimeout(() => {
+          const reduction = Math.round((1 - ratio) * 100);
+          alert(
+            `画像がキャンバスサイズより大きいため、自動で${reduction}%縮小しました。\n` +
+            `元のサイズ: ${originalWidth}×${originalHeight}px\n` +
+            `調整後: ${Math.round(width)}×${Math.round(height)}px`
+          );
+        }, 100);
       }
 
-      return { width, height };
+      return { width, height, wasResized };
     },
     []
   );

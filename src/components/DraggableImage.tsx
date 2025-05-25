@@ -38,11 +38,34 @@ const DraggableImage: React.FC<DraggableImageProps> = ({
   const imgElementRef = useRef<HTMLImageElement>(null);
   const toolbarRef = useRef<HTMLDivElement>(null);
   const hoverTimeoutRef = useRef<number | null>(null);
+  
+  // パフォーマンス最適化用のrefs
+  const rafIdRef = useRef<number | null>(null);
+  const lastUpdateTimeRef = useRef<number>(0);
+  const pendingUpdateRef = useRef<{
+    x?: number;
+    y?: number;
+    width?: number;
+    height?: number;
+  } | null>(null);
+  const canvasBoundsRef = useRef<{ width: number; height: number } | null>(null);
+  
+  // パフォーマンス測定とFPS調整
+  const performanceStatsRef = useRef<{
+    frameTimes: number[];
+    avgFrameTime: number;
+    targetFrameTime: number; // 動的に調整される
+  }>({
+    frameTimes: [],
+    avgFrameTime: 16.67, // 初期値: 60fps
+    targetFrameTime: 16.67 // 初期値: 60fps
+  });
 
   // 状態管理
   const [isDragging, setIsDragging] = useState(false);
   const [isResizing, setIsResizing] = useState(false);
   const [isHovered, setIsHovered] = useState(false);
+  const [isTransitioning, setIsTransitioning] = useState(false); // Transform終了後の遷移状態
   const [contextMenu, setContextMenu] = useState<{
     x: number;
     y: number;
@@ -96,20 +119,47 @@ const DraggableImage: React.FC<DraggableImageProps> = ({
     [selectImage, image.id, image.x, image.y, dragMode]
   );
 
-  // キャンバスの境界を取得
+  // キャンバスの境界を取得（キャッシュ機能付き）
   const getCanvasBounds = useCallback(() => {
+    if (canvasBoundsRef.current) {
+      return canvasBoundsRef.current;
+    }
+    
     const canvas = document.getElementById('image-canvas');
-    if (!canvas) return { width: window.innerWidth, height: window.innerHeight };
+    if (!canvas) {
+      const bounds = { width: window.innerWidth, height: window.innerHeight };
+      canvasBoundsRef.current = bounds;
+      return bounds;
+    }
     
     const rect = canvas.getBoundingClientRect();
-    return {
-      width: rect.width,
-      height: rect.height,
+    // 選択フレーム（ring-offset-2）とパディングを考慮して安全マージンを設定
+    const safetyMargin = 8; // ring-offset-2 (4px) + 余裕 (4px)
+    const bounds = {
+      width: rect.width - safetyMargin,
+      height: rect.height - safetyMargin,
     };
+    canvasBoundsRef.current = bounds;
+    return bounds;
+  }, []);
+
+  // キャンバス境界のキャッシュをクリア（リサイズ時など）
+  useEffect(() => {
+    const handleResize = () => {
+      canvasBoundsRef.current = null;
+    };
+    
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
   }, []);
 
   // グリッドスナップ関数
   const snapToGrid = useCallback((value: number, gridSize: number = 22) => {
+    return Math.round(value / gridSize) * gridSize;
+  }, []);
+
+  // 軽量グリッドスナップ（移動中用）- より大きなグリッドで高速化
+  const lightSnapToGrid = useCallback((value: number, gridSize: number = 44) => {
     return Math.round(value / gridSize) * gridSize;
   }, []);
 
@@ -151,8 +201,98 @@ const DraggableImage: React.FC<DraggableImageProps> = ({
       if (hoverTimeoutRef.current) {
         window.clearTimeout(hoverTimeoutRef.current);
       }
+      // requestAnimationFrameのクリーンアップ
+      if (rafIdRef.current !== null) {
+        cancelAnimationFrame(rafIdRef.current);
+        rafIdRef.current = null;
+      }
     };
   }, []);
+
+  // パフォーマンス測定
+  const measurePerformance = useCallback((frameTime: number) => {
+    const stats = performanceStatsRef.current;
+    stats.frameTimes.push(frameTime);
+    
+    // 最新50フレームのデータを保持
+    if (stats.frameTimes.length > 50) {
+      stats.frameTimes.shift();
+    }
+    
+    // 平均フレーム時間を計算
+    if (stats.frameTimes.length >= 10) {
+      stats.avgFrameTime = stats.frameTimes.reduce((a, b) => a + b, 0) / stats.frameTimes.length;
+      
+      // パフォーマンスに基づいてFPSを調整（グリッドモード考慮）
+      if (stats.avgFrameTime < 6) {
+        // 非常に高速 -> 165fps
+        stats.targetFrameTime = 6.06;
+      } else if (stats.avgFrameTime < 8) {
+        // 非常に高速 -> 120fps
+        stats.targetFrameTime = 8.33;
+      } else if (stats.avgFrameTime < 11) {
+        // 高速 -> 90fps
+        stats.targetFrameTime = 11.11;
+      } else if (stats.avgFrameTime < 14) {
+        // 中程度 -> 75fps
+        stats.targetFrameTime = 13.33;
+      } else {
+        // 標準 -> 60fps
+        stats.targetFrameTime = 16.67;
+      }
+    }
+  }, []);
+
+  // 最適化されたupdateImage関数（動的FPS調整対応）
+  const optimizedUpdateImage = useCallback((updates: Partial<ImageItem>) => {
+    // 待機中の更新を蓄積
+    pendingUpdateRef.current = {
+      ...pendingUpdateRef.current,
+      ...updates,
+    };
+
+    // 既にrequestAnimationFrameが予約されている場合は何もしない
+    if (rafIdRef.current !== null) {
+      return;
+    }
+
+    rafIdRef.current = requestAnimationFrame(() => {
+      const now = performance.now();
+      const targetFrameTime = performanceStatsRef.current.targetFrameTime;
+      
+      // 動的フレームレート制限
+      if (now - lastUpdateTimeRef.current >= targetFrameTime) {
+        if (pendingUpdateRef.current) {
+          updateImage(image.id, pendingUpdateRef.current);
+          pendingUpdateRef.current = null;
+          lastUpdateTimeRef.current = now;
+          
+          // パフォーマンス測定（実際の更新時間）
+          const frameTime = now - lastUpdateTimeRef.current + targetFrameTime;
+          measurePerformance(frameTime);
+        }
+      } else {
+        // まだ間隔が足りない場合は再度予約
+        rafIdRef.current = requestAnimationFrame(() => {
+          if (pendingUpdateRef.current) {
+            const updateStartTime = performance.now();
+            updateImage(image.id, pendingUpdateRef.current);
+            pendingUpdateRef.current = null;
+            const updateEndTime = performance.now();
+            lastUpdateTimeRef.current = updateEndTime;
+            
+            // パフォーマンス測定
+            const frameTime = updateEndTime - updateStartTime;
+            measurePerformance(frameTime);
+          }
+          rafIdRef.current = null;
+        });
+        return;
+      }
+      
+      rafIdRef.current = null;
+    });
+  }, [updateImage, image.id, measurePerformance]);
 
   // ドラッグ中
   const handleMouseMove = useCallback(
@@ -165,17 +305,18 @@ const DraggableImage: React.FC<DraggableImageProps> = ({
         let newX = dragStart.imgX + deltaX;
         let newY = dragStart.imgY + deltaY;
 
-        // グリッドスナップモードの場合はスナップを適用
+        // グリッドモードの場合は移動中も軽量スナップを適用
         if (dragMode === 'grid-snap') {
-          newX = snapToGrid(newX);
-          newY = snapToGrid(newY);
+          newX = lightSnapToGrid(newX);
+          newY = lightSnapToGrid(newY);
         }
 
         // 境界制限を適用
         const constrainedX = Math.max(0, Math.min(bounds.width - image.width, newX));
         const constrainedY = Math.max(0, Math.min(bounds.height - image.height, newY));
 
-        updateImage(image.id, {
+        // どちらのモードでも最適化されたupdate関数を使用
+        optimizedUpdateImage({
           x: constrainedX,
           y: constrainedY,
         });
@@ -194,9 +335,9 @@ const DraggableImage: React.FC<DraggableImageProps> = ({
       image.id,
       image.width,
       image.height,
-      updateImage,
+      optimizedUpdateImage,
       getCanvasBounds,
-      snapToGrid,
+      lightSnapToGrid,
     ]
   );
 
@@ -286,6 +427,18 @@ const DraggableImage: React.FC<DraggableImageProps> = ({
   // ドラッグ終了
   const handleMouseUp = useCallback(() => {
     if (isDragging && dragStart) {
+      // グリッドスナップモードの場合は最終位置でスナップを適用
+      if (dragMode === 'grid-snap') {
+        const snappedX = snapToGrid(image.x);
+        const snappedY = snapToGrid(image.y);
+        
+        // スナップした位置に更新
+        updateImage(image.id, {
+          x: snappedX,
+          y: snappedY,
+        });
+      }
+      
       // 実際に移動があったかチェック（最小移動距離3px以上）
       const deltaX = Math.abs(image.x - dragStart.imgX);
       const deltaY = Math.abs(image.y - dragStart.imgY);
@@ -321,11 +474,41 @@ const DraggableImage: React.FC<DraggableImageProps> = ({
       }
     }
 
+    // requestAnimationFrameのクリーンアップ
+    if (rafIdRef.current !== null) {
+      cancelAnimationFrame(rafIdRef.current);
+      rafIdRef.current = null;
+    }
+    
+    // 最後の更新を強制実行
+    if (pendingUpdateRef.current) {
+      updateImage(image.id, pendingUpdateRef.current);
+      pendingUpdateRef.current = null;
+    }
+
+    // フリーモードでドラッグしていた場合はスムーズな遷移を開始
+    if (isDragging && dragMode === 'free') {
+      setIsTransitioning(true);
+      // 遷移完了後にtransitioningを解除（transitionEndイベントまたはタイムアウト）
+      const timeoutId = setTimeout(() => {
+        setIsTransitioning(false);
+      }, 150); // 0.1秒のtransition + 50msの安全マージン
+      
+      // cleanup用にtimeoutIdを保存
+      const cleanup = () => {
+        clearTimeout(timeoutId);
+        setIsTransitioning(false);
+      };
+      
+      // 短時間でcleanupを実行
+      setTimeout(cleanup, 150);
+    }
+
     setIsDragging(false);
     setIsResizing(false);
     setDragStart(null);
     setResizeStart(null);
-  }, [isDragging, isResizing, dragStart, resizeStart, image.x, image.y, image.width, image.height, dispatch]);
+  }, [isDragging, isResizing, dragStart, resizeStart, image.x, image.y, image.width, image.height, dispatch, updateImage, image.id, dragMode, snapToGrid]);
 
   // リサイズハンドルのマウスダウン
   const handleResizeMouseDown = useCallback(
@@ -451,12 +634,31 @@ const DraggableImage: React.FC<DraggableImageProps> = ({
     <>
       <div
         ref={imageRef}
-        className={`absolute select-none transition-all duration-75 ${
+        className={`absolute select-none ${
+          (isDragging && dragMode === 'free') || isTransitioning ? '' : 'transition-all duration-75'
+        } ${
           isSelected ? 'ring-2 ring-blue-500 ring-offset-2' : ''
         } ${isDragging ? 'z-50' : ''}`}
         style={{
-          left: image.x,
-          top: image.y,
+          ...(dragMode === 'free' && (isDragging || isTransitioning) ? {
+            // フリーモード時はGPU加速のためtransformを使用
+            // left/topを0に固定してtransformのみで位置制御
+            left: 0,
+            top: 0,
+            transform: `translate3d(${image.x}px, ${image.y}px, 0)`,
+            willChange: isDragging ? 'transform' : 'auto',
+            // 合成レイヤーのヒント
+            backfaceVisibility: 'hidden',
+            perspective: 1000,
+            ...(isTransitioning ? {
+              transition: 'transform 0.1s ease-out',
+            } : {}),
+          } : {
+            // 通常時はleft/topを使用（transformは無効化）
+            left: image.x,
+            top: image.y,
+            transform: 'none',
+          }),
           width: image.width,
           height: image.height,
           zIndex: image.zIndex,
