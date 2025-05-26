@@ -28,6 +28,7 @@ const CropOverlay: React.FC<CropOverlayProps> = ({ image, onClose }) => {
   const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
   const [isProcessing, setIsProcessing] = useState(false);
   const imageRef = useRef<HTMLImageElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
 
   // 画像の表示サイズを計算
   const maxDisplayWidth = Math.min(window.innerWidth * 0.8, 800);
@@ -45,50 +46,53 @@ const CropOverlay: React.FC<CropOverlayProps> = ({ image, onClose }) => {
   const scaleX = displayWidth / image.width;
   const scaleY = displayHeight / image.height;
 
-  // 座標変換関数
+  // 座標変換関数（境界制限を改善）
   const screenToImage = useCallback(
     (screenX: number, screenY: number) => {
+      if (!imageRef.current) return { x: 0, y: 0 };
+      
+      const rect = imageRef.current.getBoundingClientRect();
+      const relativeX = screenX - rect.left;
+      const relativeY = screenY - rect.top;
+      
       return {
-        x: screenX / scaleX,
-        y: screenY / scaleY,
+        x: Math.max(0, Math.min(relativeX / scaleX, image.width)),
+        y: Math.max(0, Math.min(relativeY / scaleY, image.height)),
       };
     },
-    [scaleX, scaleY]
+    [scaleX, scaleY, image.width, image.height]
   );
 
-  // マウスイベントハンドラー
+  // 改良されたマウスダウンハンドラー
   const handleMouseDown = useCallback(
     (e: React.MouseEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      
       if (!imageRef.current) return;
 
-      const rect = imageRef.current.getBoundingClientRect();
-      const x = e.clientX - rect.left;
-      const y = e.clientY - rect.top;
-
+      const imageCoords = screenToImage(e.clientX, e.clientY);
+      
       setIsDragging(true);
-      setDragStart({ x, y });
+      setDragStart({ x: e.clientX, y: e.clientY });
 
-      const imageCoords = screenToImage(x, y);
       setCropArea({
-        x: Math.max(0, Math.min(imageCoords.x, image.width)),
-        y: Math.max(0, Math.min(imageCoords.y, image.height)),
+        x: imageCoords.x,
+        y: imageCoords.y,
         width: 0,
         height: 0,
       });
     },
-    [screenToImage, image.width, image.height]
+    [screenToImage]
   );
 
+  // 改良されたマウス移動ハンドラー（グローバル座標を使用）
   const handleMouseMove = useCallback(
-    (e: React.MouseEvent) => {
+    (e: MouseEvent) => {
       if (!isDragging || !imageRef.current) return;
 
-      const rect = imageRef.current.getBoundingClientRect();
-      const x = e.clientX - rect.left;
-      const y = e.clientY - rect.top;
-
       const startImageCoords = screenToImage(dragStart.x, dragStart.y);
-      const currentImageCoords = screenToImage(x, y);
+      const currentImageCoords = screenToImage(e.clientX, e.clientY);
 
       const newCropArea = {
         x: Math.max(0, Math.min(startImageCoords.x, currentImageCoords.x)),
@@ -97,24 +101,39 @@ const CropOverlay: React.FC<CropOverlayProps> = ({ image, onClose }) => {
         height: Math.abs(currentImageCoords.y - startImageCoords.y),
       };
 
-      // 画像境界内に制限
-      newCropArea.width = Math.min(
-        newCropArea.width,
-        image.width - newCropArea.x
-      );
-      newCropArea.height = Math.min(
-        newCropArea.height,
-        image.height - newCropArea.y
-      );
+      // 画像境界内に厳密に制限
+      newCropArea.x = Math.max(0, Math.min(newCropArea.x, image.width));
+      newCropArea.y = Math.max(0, Math.min(newCropArea.y, image.height));
+      newCropArea.width = Math.min(newCropArea.width, image.width - newCropArea.x);
+      newCropArea.height = Math.min(newCropArea.height, image.height - newCropArea.y);
 
       setCropArea(newCropArea);
     },
     [isDragging, dragStart, screenToImage, image.width, image.height]
   );
 
+  // 改良されたマウスアップハンドラー
   const handleMouseUp = useCallback(() => {
     setIsDragging(false);
   }, []);
+
+  // グローバルマウスイベントリスナーの設定
+  useEffect(() => {
+    if (isDragging) {
+      // グローバルイベントリスナーを追加してドラッグを継続
+      document.addEventListener('mousemove', handleMouseMove);
+      document.addEventListener('mouseup', handleMouseUp);
+      
+      // カーソルを固定
+      document.body.style.cursor = 'crosshair';
+      
+      return () => {
+        document.removeEventListener('mousemove', handleMouseMove);
+        document.removeEventListener('mouseup', handleMouseUp);
+        document.body.style.cursor = '';
+      };
+    }
+  }, [isDragging, handleMouseMove, handleMouseUp]);
 
   // 数値入力ハンドラー
   const handleInputChange = (field: keyof CropArea, value: string) => {
@@ -190,6 +209,21 @@ const CropOverlay: React.FC<CropOverlayProps> = ({ image, onClose }) => {
         },
       });
 
+      // 履歴ステップを追加（トリミング処理として記録）
+      dispatch({
+        type: 'ADD_HISTORY_STEP',
+        payload: {
+          action: 'crop-image',
+          description: '画像をトリミング',
+        },
+      });
+
+      console.info('✅ トリミングが正常に完了しました', {
+        originalSize: `${image.width}×${image.height}`,
+        croppedSize: `${cropArea.width}×${cropArea.height}`,
+        cropArea: `(${Math.round(cropArea.x)}, ${Math.round(cropArea.y)})`
+      });
+
       onClose();
     } catch (error) {
       console.error('Crop failed:', error);
@@ -212,13 +246,6 @@ const CropOverlay: React.FC<CropOverlayProps> = ({ image, onClose }) => {
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [onClose, isProcessing]);
-
-  const screenCropArea = {
-    x: cropArea.x * scaleX,
-    y: cropArea.y * scaleY,
-    width: cropArea.width * scaleX,
-    height: cropArea.height * scaleY,
-  };
 
   return (
     <AnimatePresence>
@@ -253,40 +280,41 @@ const CropOverlay: React.FC<CropOverlayProps> = ({ image, onClose }) => {
           <div className="flex flex-col lg:flex-row">
             {/* 画像プレビュー */}
             <div className="flex-1 p-4">
-              <div className="relative inline-block">
+              <div className="relative inline-block" ref={containerRef}>
                 <img
                   ref={imageRef}
                   src={image.src}
                   alt="Crop preview"
-                  className="max-w-full max-h-full object-contain cursor-crosshair"
+                  className="max-w-full max-h-full object-contain cursor-crosshair select-none"
                   style={{
                     width: displayWidth,
                     height: displayHeight,
                   }}
                   onMouseDown={handleMouseDown}
-                  onMouseMove={handleMouseMove}
-                  onMouseUp={handleMouseUp}
-                  onMouseLeave={handleMouseUp}
                   draggable={false}
                 />
 
                 {/* 選択範囲オーバーレイ */}
                 {cropArea.width > 0 && cropArea.height > 0 && (
                   <div
-                    className="absolute border-2 border-blue-500 bg-blue-500 bg-opacity-20"
+                    className="absolute border-2 border-blue-500 bg-blue-500 bg-opacity-20 pointer-events-none"
                     style={{
-                      left: screenCropArea.x,
-                      top: screenCropArea.y,
-                      width: screenCropArea.width,
-                      height: screenCropArea.height,
-                      pointerEvents: 'none',
+                      left: cropArea.x * scaleX,
+                      top: cropArea.y * scaleY,
+                      width: cropArea.width * scaleX,
+                      height: cropArea.height * scaleY,
                     }}
                   >
                     {/* 選択範囲の情報表示 */}
-                    <div className="absolute -top-6 left-0 bg-blue-500 text-white text-xs px-2 py-1 rounded">
-                      {Math.round(cropArea.width)} ×{' '}
-                      {Math.round(cropArea.height)}
+                    <div className="absolute -top-6 left-0 bg-blue-500 text-white text-xs px-2 py-1 rounded whitespace-nowrap">
+                      {Math.round(cropArea.width)} × {Math.round(cropArea.height)}
                     </div>
+                    
+                    {/* コーナーハンドル（視覚的なヒント） */}
+                    <div className="absolute -top-1 -left-1 w-2 h-2 bg-blue-500 border border-white rounded-full"></div>
+                    <div className="absolute -top-1 -right-1 w-2 h-2 bg-blue-500 border border-white rounded-full"></div>
+                    <div className="absolute -bottom-1 -left-1 w-2 h-2 bg-blue-500 border border-white rounded-full"></div>
+                    <div className="absolute -bottom-1 -right-1 w-2 h-2 bg-blue-500 border border-white rounded-full"></div>
                   </div>
                 )}
               </div>

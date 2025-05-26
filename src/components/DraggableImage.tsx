@@ -633,7 +633,13 @@ const DraggableImage: React.FC<DraggableImageProps> = ({
   };
 
   // コンテキストメニューアクション
-  const contextMenuActions = [
+  const contextMenuActions: Array<{
+    label?: string;
+    icon?: React.ComponentType<{ className?: string }>;
+    action?: () => void;
+    danger?: boolean;
+    separator?: boolean;
+  }> = [
     {
       label: 'ダウンロード...',
       icon: ArrowDownTrayIcon,
@@ -850,6 +856,39 @@ const DraggableImage: React.FC<DraggableImageProps> = ({
           </div>
         )}
       </div>
+
+      {/* コンテキストメニュー */}
+      {contextMenu && (
+        <div
+          className="fixed bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-md shadow-lg py-1 z-50 min-w-48"
+          style={{ left: contextMenu.x, top: contextMenu.y }}
+        >
+          {contextMenuActions.map((item, index) =>
+            item.separator ? (
+              <div
+                key={index}
+                className="border-t border-gray-200 dark:border-gray-700 my-1"
+              />
+            ) : (
+              <button
+                key={index}
+                onClick={() => {
+                  item.action?.();
+                  setContextMenu(null);
+                }}
+                className={`w-full text-left px-4 py-2 text-sm flex items-center space-x-2 transition-colors ${
+                  item.danger
+                    ? 'text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20'
+                    : 'text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700'
+                }`}
+              >
+                {item.icon && <item.icon className="w-4 h-4" />}
+                <span>{item.label}</span>
+              </button>
+            )
+          )}
+        </div>
+      )}
     </>
   );
 };

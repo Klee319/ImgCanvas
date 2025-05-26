@@ -123,13 +123,42 @@ const DownloadDialog: React.FC<DownloadDialogProps> = ({
     onClose();
   };
 
+  // キーボードイベントハンドラー（グローバルショートカットキーを阻害しない）
   const handleKeyDown = (e: React.KeyboardEvent) => {
+    // モーダル固有のキーのみ処理し、その他はグローバルに委譲
     if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
       onClose();
     } else if (e.key === 'Enter') {
+      e.preventDefault();
+      e.stopPropagation();
       handleDownload();
     }
+    // その他のキー（Ctrl+Z、Ctrl+C等）は伝播を許可してグローバルショートカットを動作させる
   };
+
+  // グローバルキーボードイベント用のエフェクト（追加の保険）
+  useEffect(() => {
+    const handleGlobalKeyDown = (e: KeyboardEvent) => {
+      // モーダル固有キー以外はグローバル処理を優先
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        onClose();
+      } else if (e.key === 'Enter') {
+        e.preventDefault();
+        handleDownload();
+      }
+      // Ctrl+Z、Ctrl+C等は自然にグローバルハンドラーに委譲される
+    };
+
+    // モーダル表示中はグローバルリスナーも追加
+    document.addEventListener('keydown', handleGlobalKeyDown);
+    
+    return () => {
+      document.removeEventListener('keydown', handleGlobalKeyDown);
+    };
+  }, [onClose, selectedFormat, quality, onDownload]);
 
   return (
     <AnimatePresence>
@@ -139,8 +168,6 @@ const DownloadDialog: React.FC<DownloadDialogProps> = ({
         exit={{ opacity: 0 }}
         className="fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center p-4"
         onClick={onClose}
-        onKeyDown={handleKeyDown}
-        tabIndex={-1}
       >
         <motion.div
           initial={{ scale: 0.9, opacity: 0 }}
@@ -148,6 +175,7 @@ const DownloadDialog: React.FC<DownloadDialogProps> = ({
           exit={{ scale: 0.9, opacity: 0 }}
           className="bg-white dark:bg-slate-800 rounded-lg shadow-2xl max-w-2xl w-full max-h-[90vh] flex flex-col overflow-hidden"
           onClick={(e) => e.stopPropagation()}
+          onKeyDown={handleKeyDown}
         >
           {/* ヘッダー - 固定 */}
           <div className="flex items-center justify-between p-4 border-b border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 flex-shrink-0">
