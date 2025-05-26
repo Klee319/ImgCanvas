@@ -80,18 +80,32 @@ const createHistoryStep = (
 const imageReducer = produce((draft: AppState, action: Action) => {
   switch (action.type) {
     case 'ADD_IMAGE': {
-      // 重複チェック: 同じsrcの画像が最近追加されていないか確認
-      const recentImages = draft.images.slice(-2); // 直近2枚をチェック（連続ペーストを考慮）
+      // 重複チェック: 同じsrcの画像が最近追加されていないか確認（より緩い条件）
+      const recentImages = draft.images.slice(-1); // 直前の1枚のみをチェック
       const now = Date.now();
       const isDuplicate = recentImages.some(
-        img => img.src === action.payload.src && 
-        Math.abs(img.x - action.payload.x) < 20 && 
-        Math.abs(img.y - action.payload.y) < 20 &&
-        (now - parseInt(img.id.split('_')[1])) < 100 // 100ms以内の場合のみ重複とみなす
+        img => {
+          // 同じデータURLかつ50ms以内で完全に同じ位置の場合のみ重複とみなす
+          const isVeryRecentDuplicate = 
+            img.src === action.payload.src && 
+            img.x === action.payload.x && 
+            img.y === action.payload.y &&
+            (now - parseInt(img.id.split('_')[1])) < 50; // 50ms以内
+          
+          if (isVeryRecentDuplicate) {
+            console.warn('Very recent duplicate detected:', { 
+              timeDiff: now - parseInt(img.id.split('_')[1]),
+              coordinates: { x: img.x, y: img.y },
+              newCoordinates: { x: action.payload.x, y: action.payload.y }
+            });
+          }
+          
+          return isVeryRecentDuplicate;
+        }
       );
 
       if (isDuplicate) {
-        console.warn('Duplicate image detected and prevented:', action.payload.src.substring(0, 50) + '...');
+        console.warn('Duplicate image prevented:', action.payload.src.substring(0, 50) + '...');
         break;
       }
 
@@ -105,7 +119,11 @@ const imageReducer = produce((draft: AppState, action: Action) => {
       draft.images.push(newImage);
       draft.selectedImageId = newImage.id;
 
-      console.info(`✅ Image added successfully. Total images: ${draft.images.length}`);
+      console.info(`✅ Image added successfully. Total images: ${draft.images.length}`, {
+        id: newImage.id,
+        size: `${newImage.width}×${newImage.height}`,
+        position: `(${newImage.x}, ${newImage.y})`
+      });
 
       // 履歴に追加
       const historyStep = createHistoryStep(

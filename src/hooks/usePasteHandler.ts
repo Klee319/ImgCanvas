@@ -86,47 +86,74 @@ export const usePasteHandler = () => {
     [state.images]
   );
 
-  // 画像サイズの自動調整（動的キャンバスサイズ対応）
+  // 画像サイズの自動調整（安定化キャンバスサイズ対応）
   const adjustImageSize = useCallback(
     (originalWidth: number, originalHeight: number) => {
-      // 動的にキャンバスサイズを取得
-      const canvas = document.getElementById('image-canvas');
-      const canvasRect = canvas?.getBoundingClientRect();
-      
-      const maxWidth = canvasRect ? canvasRect.width * 0.9 : 720; // キャンバスの90%
-      const maxHeight = canvasRect ? canvasRect.height * 0.9 : 540; // キャンバスの90%
-
-      let width = originalWidth;
-      let height = originalHeight;
-      let wasResized = false;
-
-      // 大きすぎる場合は縮小
-      if (width > maxWidth || height > maxHeight) {
-        const widthRatio = maxWidth / width;
-        const heightRatio = maxHeight / height;
-        const ratio = Math.min(widthRatio, heightRatio);
-
-        width = width * ratio;
-        height = height * ratio;
-        wasResized = true;
+      try {
+        // 安定したキャンバスサイズを取得（デフォルト値で安定性確保）
+        const canvas = document.getElementById('image-canvas');
+        const canvasRect = canvas?.getBoundingClientRect();
         
-        // アラート表示（非同期で表示してUXを阻害しない）
-        setTimeout(() => {
-          const reduction = Math.round((1 - ratio) * 100);
-          alert(
-            `画像がキャンバスサイズより大きいため、自動で${reduction}%縮小しました。\n` +
-            `元のサイズ: ${originalWidth}×${originalHeight}px\n` +
-            `調整後: ${Math.round(width)}×${Math.round(height)}px`
-          );
-        }, 100);
-      }
+        // より保守的なサイズ制限（デフォルト値を大きめに設定）
+        const defaultMaxWidth = 1200; // デフォルト最大幅
+        const defaultMaxHeight = 900; // デフォルト最大高さ
+        
+        const maxWidth = canvasRect ? Math.max(canvasRect.width * 0.85, 800) : defaultMaxWidth;
+        const maxHeight = canvasRect ? Math.max(canvasRect.height * 0.85, 600) : defaultMaxHeight;
 
-      return { width, height, wasResized };
+        let width = originalWidth;
+        let height = originalHeight;
+        let wasResized = false;
+
+        // 明らかに大きすぎる場合のみ縮小（閾値を上げる）
+        const isTooWide = width > maxWidth;
+        const isTooTall = height > maxHeight;
+        
+        if (isTooWide || isTooTall) {
+          const widthRatio = maxWidth / width;
+          const heightRatio = maxHeight / height;
+          const ratio = Math.min(widthRatio, heightRatio);
+
+          // 縮小比率が極端でない場合のみ縮小
+          if (ratio < 0.9) {
+            width = Math.round(width * ratio);
+            height = Math.round(height * ratio);
+            wasResized = true;
+            
+            console.info('Image resized for canvas fit:', {
+              original: `${originalWidth}×${originalHeight}`,
+              adjusted: `${width}×${height}`,
+              ratio: `${Math.round((1-ratio) * 100)}% reduction`,
+              canvasSize: `${maxWidth}×${maxHeight}`
+            });
+            
+            // 非同期でユーザー通知（UXを阻害しない）
+            setTimeout(() => {
+              const reduction = Math.round((1 - ratio) * 100);
+              alert(
+                `画像がキャンバスより大きいため、自動で${reduction}%縮小しました。\n` +
+                `元のサイズ: ${originalWidth}×${originalHeight}px\n` +
+                `調整後: ${width}×${height}px`
+              );
+            }, 100);
+          }
+        }
+
+        return { width, height, wasResized };
+      } catch (error) {
+        console.error('Error in adjustImageSize:', error);
+        // エラー時は元のサイズをそのまま返す（安全な動作）
+        return { 
+          width: originalWidth, 
+          height: originalHeight, 
+          wasResized: false 
+        };
+      }
     },
     []
   );
 
-  // クリップボードから画像を処理
+  // クリップボードから画像を処理（エラーハンドリング強化）
   const handlePasteFromClipboard = useCallback(async () => {
     if (isProcessingPaste) {
       console.info('Paste already in progress, skipping...');
@@ -136,10 +163,25 @@ export const usePasteHandler = () => {
     setIsProcessingPaste(true);
 
     try {
+      console.info('Starting Modern Clipboard API paste...');
+      
       // まずModern Clipboard APIを試行
       const imageDataUrl = await readImageFromClipboard();
+      
+      // 画像サイズチェック（メモリ不足防止）
+      const imageSizeInMB = (imageDataUrl.length * 0.75) / (1024 * 1024); // Base64のサイズ概算
+      if (imageSizeInMB > 50) { // 50MB制限
+        throw new Error(`画像サイズが大きすぎます (${imageSizeInMB.toFixed(1)}MB)。50MB以下の画像を使用してください。`);
+      }
+      
       const { width: originalWidth, height: originalHeight } =
         await getImageDimensions(imageDataUrl);
+      
+      // 異常に大きな画像の拒否
+      if (originalWidth > 8000 || originalHeight > 8000) {
+        throw new Error(`画像の解像度が大きすぎます (${originalWidth}×${originalHeight})。8000×8000px以下の画像を使用してください。`);
+      }
+      
       const { width, height } = adjustImageSize(originalWidth, originalHeight);
       const { x, y } = calculateImagePosition(width, height);
 
@@ -155,12 +197,26 @@ export const usePasteHandler = () => {
         aspectRatioLocked: true,
       });
 
-      console.info('Successfully pasted image using Modern Clipboard API');
+      console.info('✅ Successfully pasted image using Modern Clipboard API', {
+        size: `${originalWidth}×${originalHeight}`,
+        adjusted: `${width}×${height}`,
+        position: `(${x}, ${y})`
+      });
       return true;
     } catch (err) {
-      console.warn('Modern Clipboard API failed, this is expected for legacy browsers:', err);
+      console.warn('Modern Clipboard API failed:', err);
+      
+      // ユーザーに分かりやすいエラーメッセージを表示
+      if (err instanceof Error) {
+        if (err.message.includes('大きすぎます') || err.message.includes('解像度')) {
+          // サイズエラーは即座に表示
+          alert(err.message);
+        } else if (err.message.includes('No image found')) {
+          console.info('No image in clipboard, user should copy an image first');
+        }
+      }
+      
       // Modern Clipboard APIが失敗した場合は、ペーストイベントを待つ
-      // この場合は何もしない（handlePasteEventが処理する）
       return false;
     } finally {
       // フラグをリセット（短時間で次のペーストを許可）
@@ -175,7 +231,7 @@ export const usePasteHandler = () => {
     addImage,
   ]);
 
-  // レガシー貼り付けイベントの処理
+  // レガシー貼り付けイベントの処理（エラーハンドリング強化）
   const handlePasteEvent = useCallback(
     async (event: ClipboardEvent) => {
       // デフォルトの貼り付けを防止
@@ -199,6 +255,7 @@ export const usePasteHandler = () => {
       // クリップボードデータの存在確認
       if (!event.clipboardData || event.clipboardData.items.length === 0) {
         console.warn('No clipboard data available in paste event');
+        setIsProcessingPaste(false);
         return false;
       }
 
@@ -208,8 +265,21 @@ export const usePasteHandler = () => {
       
       try {
         const imageDataUrl = await readImageFromClipboardLegacy(event);
+        
+        // 画像サイズチェック（メモリ不足防止）
+        const imageSizeInMB = (imageDataUrl.length * 0.75) / (1024 * 1024);
+        if (imageSizeInMB > 50) {
+          throw new Error(`画像サイズが大きすぎます (${imageSizeInMB.toFixed(1)}MB)。50MB以下の画像を使用してください。`);
+        }
+        
         const { width: originalWidth, height: originalHeight } =
           await getImageDimensions(imageDataUrl);
+          
+        // 異常に大きな画像の拒否
+        if (originalWidth > 8000 || originalHeight > 8000) {
+          throw new Error(`画像の解像度が大きすぎます (${originalWidth}×${originalHeight})。8000×8000px以下の画像を使用してください。`);
+        }
+        
         const { width, height } = adjustImageSize(
           originalWidth,
           originalHeight
@@ -228,15 +298,26 @@ export const usePasteHandler = () => {
           aspectRatioLocked: true,
         });
 
-        console.info('Successfully pasted image using legacy handler');
+        console.info('✅ Successfully pasted image using legacy handler', {
+          size: `${originalWidth}×${originalHeight}`,
+          adjusted: `${width}×${height}`,
+          position: `(${x}, ${y})`
+        });
         return true;
       } catch (err) {
         console.error('Failed to paste image using legacy handler:', err);
         
         // ユーザーに分かりやすいエラーメッセージを表示
-        const errorMessage = err instanceof Error ? err.message : 'Unknown error';
-        if (errorMessage.includes('No image found')) {
-          console.warn('No image data found in clipboard. Please copy an image first.');
+        if (err instanceof Error) {
+          if (err.message.includes('大きすぎます') || err.message.includes('解像度')) {
+            // サイズエラーは即座に表示
+            alert(err.message);
+          } else if (err.message.includes('No image found')) {
+            console.info('No image data found in clipboard. Please copy an image first.');
+          } else {
+            // その他のエラーも表示
+            alert(`画像の貼り付けに失敗しました: ${err.message}`);
+          }
         }
         
         return false;
@@ -317,7 +398,7 @@ export const usePasteHandler = () => {
     };
   }, [handleKeyDown, handlePasteEvent]);
 
-  // ドラッグ&ドロップによるファイル貼り付け
+  // ドラッグ&ドロップによるファイル貼り付け（エラーハンドリング強化）
   const handleFileDrop = useCallback(
     async (files: FileList | File[]) => {
       const fileArray = Array.from(files);
@@ -325,8 +406,20 @@ export const usePasteHandler = () => {
         file.type.startsWith('image/')
       );
 
+      if (imageFiles.length === 0) {
+        alert('画像ファイルが見つかりません。画像ファイルをドロップしてください。');
+        return;
+      }
+
       for (const file of imageFiles) {
         try {
+          // ファイルサイズチェック
+          const fileSizeInMB = file.size / (1024 * 1024);
+          if (fileSizeInMB > 50) {
+            alert(`ファイル "${file.name}" が大きすぎます (${fileSizeInMB.toFixed(1)}MB)。50MB以下のファイルを使用してください。`);
+            continue;
+          }
+
           const reader = new FileReader();
           const imageDataUrl = await new Promise<string>((resolve, reject) => {
             reader.onload = (event) => {
@@ -337,12 +430,19 @@ export const usePasteHandler = () => {
                 reject(new Error('Failed to read file'));
               }
             };
-            reader.onerror = () => reject(new Error('Failed to read file'));
+            reader.onerror = () => reject(new Error(`Failed to read file: ${file.name}`));
             reader.readAsDataURL(file);
           });
 
           const { width: originalWidth, height: originalHeight } =
             await getImageDimensions(imageDataUrl);
+            
+          // 異常に大きな画像の拒否
+          if (originalWidth > 8000 || originalHeight > 8000) {
+            alert(`ファイル "${file.name}" の解像度が大きすぎます (${originalWidth}×${originalHeight})。8000×8000px以下の画像を使用してください。`);
+            continue;
+          }
+          
           const { width, height } = adjustImageSize(
             originalWidth,
             originalHeight
@@ -360,8 +460,16 @@ export const usePasteHandler = () => {
             visible: true,
             aspectRatioLocked: true,
           });
+          
+          console.info(`✅ Successfully dropped file: ${file.name}`, {
+            size: `${originalWidth}×${originalHeight}`,
+            adjusted: `${width}×${height}`,
+            position: `(${x}, ${y})`
+          });
         } catch (err) {
-          console.error('Failed to process dropped file:', err);
+          console.error(`Failed to process dropped file: ${file.name}`, err);
+          const errorMessage = err instanceof Error ? err.message : 'Unknown error';
+          alert(`ファイル "${file.name}" の処理に失敗しました: ${errorMessage}`);
         }
       }
     },

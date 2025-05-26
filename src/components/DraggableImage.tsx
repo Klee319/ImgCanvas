@@ -81,6 +81,8 @@ const DraggableImage: React.FC<DraggableImageProps> = ({
   const [resizeStart, setResizeStart] = useState<{
     x: number;
     y: number;
+    imgX: number;
+    imgY: number;
     width: number;
     height: number;
     handle: ResizeHandle;
@@ -341,7 +343,7 @@ const DraggableImage: React.FC<DraggableImageProps> = ({
     ]
   );
 
-  // リサイズ処理
+  // リサイズ処理（座標計算を修正）
   const handleResize = useCallback(
     (e: MouseEvent) => {
       if (!resizeStart) return;
@@ -349,59 +351,93 @@ const DraggableImage: React.FC<DraggableImageProps> = ({
       const deltaX = e.clientX - resizeStart.x;
       const deltaY = e.clientY - resizeStart.y;
 
+      // リサイズ開始時の値を基準にする
       let newWidth = resizeStart.width;
       let newHeight = resizeStart.height;
-      let newX = image.x;
-      let newY = image.y;
+      let newX = resizeStart.imgX; // 開始時のX座標を使用
+      let newY = resizeStart.imgY; // 開始時のY座標を使用
 
       const aspectRatio = image.originalWidth / image.originalHeight;
       const isAspectLocked = image.aspectRatioLocked && !e.shiftKey;
       const bounds = getCanvasBounds();
 
+      // 各ハンドルの処理（開始時の座標を基準に計算）
       switch (resizeStart.handle) {
-        case 'se':
+        case 'se': // 右下角 - 位置変更なし
           newWidth = Math.max(50, resizeStart.width + deltaX);
           newHeight = Math.max(50, resizeStart.height + deltaY);
+          // newX, newYは変更なし
           break;
-        case 'sw':
+          
+        case 'sw': // 左下角 - X座標が変更される
           newWidth = Math.max(50, resizeStart.width - deltaX);
           newHeight = Math.max(50, resizeStart.height + deltaY);
-          newX = image.x + (resizeStart.width - newWidth);
+          newX = resizeStart.imgX + (resizeStart.width - newWidth);
+          // newYは変更なし
           break;
-        case 'ne':
+          
+        case 'ne': // 右上角 - Y座標が変更される
           newWidth = Math.max(50, resizeStart.width + deltaX);
           newHeight = Math.max(50, resizeStart.height - deltaY);
-          newY = image.y + (resizeStart.height - newHeight);
+          // newXは変更なし
+          newY = resizeStart.imgY + (resizeStart.height - newHeight);
           break;
-        case 'nw':
+          
+        case 'nw': // 左上角 - X, Y座標両方が変更される
           newWidth = Math.max(50, resizeStart.width - deltaX);
           newHeight = Math.max(50, resizeStart.height - deltaY);
-          newX = image.x + (resizeStart.width - newWidth);
-          newY = image.y + (resizeStart.height - newHeight);
+          newX = resizeStart.imgX + (resizeStart.width - newWidth);
+          newY = resizeStart.imgY + (resizeStart.height - newHeight);
           break;
       }
 
-      // アスペクト比を維持
+      // アスペクト比維持の処理（座標補正を含む）
       if (isAspectLocked) {
-        if (resizeStart.handle === 'se' || resizeStart.handle === 'nw') {
-          const ratio = Math.min(
-            newWidth / resizeStart.width,
-            newHeight / resizeStart.height
-          );
-          newWidth = resizeStart.width * ratio;
-          newHeight = resizeStart.height * ratio;
-        } else {
-          newHeight = newWidth / aspectRatio;
+        const currentRatio = newWidth / newHeight;
+        
+        if (currentRatio > aspectRatio) {
+          // 幅が大きすぎる場合、幅を縮小
+          const adjustedWidth = newHeight * aspectRatio;
+          const widthDiff = newWidth - adjustedWidth;
+          newWidth = adjustedWidth;
+          
+          // 左側のハンドルの場合、X座標を調整
+          if (resizeStart.handle === 'sw' || resizeStart.handle === 'nw') {
+            newX += widthDiff;
+          }
+        } else if (currentRatio < aspectRatio) {
+          // 高さが大きすぎる場合、高さを縮小
+          const adjustedHeight = newWidth / aspectRatio;
+          const heightDiff = newHeight - adjustedHeight;
+          newHeight = adjustedHeight;
+          
+          // 上側のハンドルの場合、Y座標を調整
+          if (resizeStart.handle === 'ne' || resizeStart.handle === 'nw') {
+            newY += heightDiff;
+          }
         }
       }
 
-      // 境界制限を適用
-      newWidth = Math.min(newWidth, bounds.width - newX);
-      newHeight = Math.min(newHeight, bounds.height - newY);
-      newX = Math.max(0, Math.min(bounds.width - newWidth, newX));
-      newY = Math.max(0, Math.min(bounds.height - newHeight, newY));
+      // 境界制限の適用（座標とサイズを同時に調整）
+      // 最小位置制限
+      if (newX < 0) {
+        newWidth = newWidth + newX; // 左にはみ出た分、幅を縮小
+        newX = 0;
+      }
+      if (newY < 0) {
+        newHeight = newHeight + newY; // 上にはみ出た分、高さを縮小
+        newY = 0;
+      }
+      
+      // 最大位置制限
+      if (newX + newWidth > bounds.width) {
+        newWidth = bounds.width - newX;
+      }
+      if (newY + newHeight > bounds.height) {
+        newHeight = bounds.height - newY;
+      }
 
-      // 最小サイズを確保
+      // 最小サイズを再度確保（境界制限で小さくなりすぎた場合）
       newWidth = Math.max(50, newWidth);
       newHeight = Math.max(50, newHeight);
 
@@ -414,14 +450,15 @@ const DraggableImage: React.FC<DraggableImageProps> = ({
         newHeight = snapToGrid(newHeight, gridSize);
       }
 
-      updateImage(image.id, {
+      // 最適化されたupdate関数を使用
+      optimizedUpdateImage({
         x: newX,
         y: newY,
         width: newWidth,
         height: newHeight,
       });
     },
-    [resizeStart, image, updateImage, getCanvasBounds, dragMode, snapToGrid]
+    [resizeStart, image.originalWidth, image.originalHeight, image.aspectRatioLocked, optimizedUpdateImage, getCanvasBounds, dragMode, snapToGrid]
   );
 
   // ドラッグ終了
@@ -510,7 +547,7 @@ const DraggableImage: React.FC<DraggableImageProps> = ({
     setResizeStart(null);
   }, [isDragging, isResizing, dragStart, resizeStart, image.x, image.y, image.width, image.height, dispatch, updateImage, image.id, dragMode, snapToGrid]);
 
-  // リサイズハンドルのマウスダウン
+  // リサイズハンドルのマウスダウン（座標記録を修正）
   const handleResizeMouseDown = useCallback(
     (e: React.MouseEvent, handle: ResizeHandle) => {
       e.preventDefault();
@@ -520,12 +557,14 @@ const DraggableImage: React.FC<DraggableImageProps> = ({
       setResizeStart({
         x: e.clientX,
         y: e.clientY,
+        imgX: image.x, // 画像の開始X座標を記録
+        imgY: image.y, // 画像の開始Y座標を記録
         width: image.width,
         height: image.height,
         handle,
       });
     },
-    [image.width, image.height]
+    [image.x, image.y, image.width, image.height]
   );
 
   // 右クリックメニュー
@@ -806,52 +845,11 @@ const DraggableImage: React.FC<DraggableImageProps> = ({
                 }`}
                 onMouseDown={(e) => handleResizeMouseDown(e, handle)}
                 title={`${handle.toUpperCase()}角をドラッグしてリサイズ`}
-                aria-label={`${handle}角リサイズハンドル`}
               />
             ))}
           </div>
         )}
-
-        {/* リサイズ中のヘルプテキスト */}
-        {isResizing && (
-          <div className="absolute -bottom-8 left-0 bg-black bg-opacity-75 text-white text-xs px-2 py-1 rounded whitespace-nowrap">
-            Shiftキーでアスペクト比解除
-          </div>
-        )}
       </div>
-
-      {/* コンテキストメニュー */}
-      {contextMenu && (
-        <div
-          className="fixed bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-md shadow-lg py-1 z-50 min-w-48"
-          style={{ left: contextMenu.x, top: contextMenu.y }}
-        >
-          {contextMenuActions.map((item, index) =>
-            item.separator ? (
-              <div
-                key={index}
-                className="border-t border-gray-200 dark:border-gray-700 my-1"
-              />
-            ) : (
-              <button
-                key={index}
-                onClick={() => {
-                  item.action?.();
-                  setContextMenu(null);
-                }}
-                className={`w-full text-left px-4 py-2 text-sm flex items-center space-x-2 transition-colors ${
-                  item.danger
-                    ? 'text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20'
-                    : 'text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700'
-                }`}
-              >
-                {item.icon && <item.icon className="w-4 h-4" />}
-                <span>{item.label}</span>
-              </button>
-            )
-          )}
-        </div>
-      )}
     </>
   );
 };
