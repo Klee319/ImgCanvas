@@ -1,4 +1,4 @@
-import React, { Component, ErrorInfo, ReactNode } from 'react';
+import { Component, ErrorInfo, ReactNode } from 'react';
 
 interface Props {
   children: ReactNode;
@@ -16,7 +16,7 @@ class ErrorBoundary extends Component<Props, State> {
     this.state = { hasError: false, error: null, errorInfo: null };
   }
 
-  static getDerivedStateFromError(error: Error): Partial<State> {
+  static getDerivedStateFromError(_: Error): Partial<State> {
     // 次のレンダリングでフォールバック UI が表示されるように state を更新
     return { hasError: true };
   }
@@ -90,7 +90,7 @@ class ErrorBoundary extends Component<Props, State> {
             </div>
             
             {/* 開発環境でのエラー詳細表示 */}
-            {process.env.NODE_ENV === 'development' && this.state.error && (
+            {(import.meta as any).env.MODE === 'development' && this.state.error && (
               <details className="mt-6 p-4 bg-gray-50 dark:bg-gray-700 rounded-md">
                 <summary className="text-sm text-gray-700 dark:text-gray-300 cursor-pointer">
                   エラー詳細 (開発環境のみ)

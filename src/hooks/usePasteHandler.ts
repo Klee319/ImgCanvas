@@ -2,6 +2,11 @@ import { useEffect, useCallback, useState } from 'react';
 import { useClipboard } from './useClipboard';
 import { useImageContext } from '../context/ImageContext';
 
+// グローバルなアラート制御（モジュールレベル）
+let isResizeAlertShowing = false;
+let lastResizeAlertTime = 0;
+const RESIZE_ALERT_COOLDOWN = 3000; // 3秒のクールダウン
+
 export const usePasteHandler = () => {
   const {
     readImageFromClipboard,
@@ -130,11 +135,32 @@ export const usePasteHandler = () => {
             // 非同期でユーザー通知（UXを阻害しない）
             setTimeout(() => {
               const reduction = Math.round((1 - ratio) * 100);
-              alert(
-                `画像がキャンバスより大きいため、自動で${reduction}%縮小しました。\n` +
-                `元のサイズ: ${originalWidth}×${originalHeight}px\n` +
-                `調整後: ${width}×${height}px`
-              );
+              const now = Date.now();
+              
+              if (!isResizeAlertShowing && (now - lastResizeAlertTime > RESIZE_ALERT_COOLDOWN)) {
+                isResizeAlertShowing = true;
+                console.info('Showing resize alert');
+                
+                alert(
+                  `画像がキャンバスより大きいため、自動で${reduction}%縮小しました。\n` +
+                  `元のサイズ: ${originalWidth}×${originalHeight}px\n` +
+                  `調整後: ${width}×${height}px`
+                );
+                
+                lastResizeAlertTime = now;
+                
+                // アラート表示完了後にフラグをリセット
+                setTimeout(() => {
+                  isResizeAlertShowing = false;
+                  console.info('Reset resize alert flag');
+                }, 500); // アラートが閉じられるまでの時間を考慮
+              } else {
+                console.info('Skipping duplicate resize alert', {
+                  isShowing: isResizeAlertShowing,
+                  timeSinceLastAlert: now - lastResizeAlertTime,
+                  cooldown: RESIZE_ALERT_COOLDOWN
+                });
+              }
             }, 100);
           }
         }
