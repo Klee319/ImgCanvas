@@ -1,3 +1,29 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+/* Windows環境向けパフォーマンス最適化 */
+.image-rendering-speed {
+  image-rendering: optimizeSpeed;
+  image-rendering: -webkit-optimize-contrast;
+  image-rendering: -moz-crisp-edges;
+}
+
+/* Windows環境のフリーモードリサイズ向け超軽量設定 */
+.windows-free-resize {
+  /* レンダリング最適化 */
+  will-change: auto;
+  transform: none;
+  transition: none;
+  
+  /* 合成レイヤーの最適化 */
+  isolation: auto;
+  contain: layout;
+  
+  /* ブラウザヒント */
+  content-visibility: auto;
+  
+  /* 高速レンダリング */
+  image-rendering: auto;
+  backface-visibility: visible;
+}

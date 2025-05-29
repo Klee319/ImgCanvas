@@ -140,3 +140,4 @@ export interface PerformanceStats {
   imageCount: number;
   historySize: number;
 }
+ 

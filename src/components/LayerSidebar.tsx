@@ -259,3 +259,4 @@ const LayerSidebar: React.FC<LayerSidebarProps> = ({ isOpen, onClose }) => {
 };
 
 export default LayerSidebar;
+ 

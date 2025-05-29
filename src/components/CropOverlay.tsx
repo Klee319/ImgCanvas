@@ -449,3 +449,4 @@ const CropOverlay: React.FC<CropOverlayProps> = ({ image, onClose }) => {
 };
 
 export default CropOverlay;
+ 

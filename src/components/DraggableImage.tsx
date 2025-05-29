@@ -50,15 +50,21 @@ const DraggableImage: React.FC<DraggableImageProps> = ({
   } | null>(null);
   const canvasBoundsRef = useRef<{ width: number; height: number } | null>(null);
   
-  // パフォーマンス測定とFPS調整
-  const performanceStatsRef = useRef<{
-    frameTimes: number[];
-    avgFrameTime: number;
-    targetFrameTime: number; // 動的に調整される
+  // Windows環境検出
+  const isWindows = useRef<boolean>(
+    typeof navigator !== 'undefined' && 
+    navigator.userAgent.toLowerCase().includes('windows')
+  );
+  
+  // Windows向け最適化設定
+  const windowsOptimization = useRef<{
+    targetFrameTime: number; // Windows向けの固定フレームレート
+    useSimplifiedResize: boolean; // リサイズ計算の簡素化
+    bypassComplexCalculations: boolean; // 複雑な計算のバイパス
   }>({
-    frameTimes: [],
-    avgFrameTime: 16.67, // 初期値: 60fps
-    targetFrameTime: 16.67 // 初期値: 60fps
+    targetFrameTime: isWindows.current ? 33.33 : 16.67, // Windows: 30fps, Others: 60fps
+    useSimplifiedResize: isWindows.current,
+    bypassComplexCalculations: isWindows.current
   });
 
   // 状態管理
@@ -211,42 +217,21 @@ const DraggableImage: React.FC<DraggableImageProps> = ({
     };
   }, []);
 
-  // パフォーマンス測定
-  const measurePerformance = useCallback((frameTime: number) => {
-    const stats = performanceStatsRef.current;
-    stats.frameTimes.push(frameTime);
-    
-    // 最新50フレームのデータを保持
-    if (stats.frameTimes.length > 50) {
-      stats.frameTimes.shift();
-    }
-    
-    // 平均フレーム時間を計算
-    if (stats.frameTimes.length >= 10) {
-      stats.avgFrameTime = stats.frameTimes.reduce((a, b) => a + b, 0) / stats.frameTimes.length;
-      
-      // パフォーマンスに基づいてFPSを調整（グリッドモード考慮）
-      if (stats.avgFrameTime < 6) {
-        // 非常に高速 -> 165fps
-        stats.targetFrameTime = 6.06;
-      } else if (stats.avgFrameTime < 8) {
-        // 非常に高速 -> 120fps
-        stats.targetFrameTime = 8.33;
-      } else if (stats.avgFrameTime < 11) {
-        // 高速 -> 90fps
-        stats.targetFrameTime = 11.11;
-      } else if (stats.avgFrameTime < 14) {
-        // 中程度 -> 75fps
-        stats.targetFrameTime = 13.33;
-      } else {
-        // 標準 -> 60fps
-        stats.targetFrameTime = 16.67;
-      }
-    }
-  }, []);
-
-  // 最適化されたupdateImage関数（動的FPS調整対応）
+  // Windows向け最適化されたupdate関数
   const optimizedUpdateImage = useCallback((updates: Partial<ImageItem>) => {
+    // Windows環境でのフリーモードリサイズ中は特別な処理
+    if (isWindows.current && isResizing && dragMode === 'free') {
+      // 即座に更新、バッチ処理なし
+      updateImage(image.id, updates);
+      return;
+    }
+
+    // Windows環境では即座に更新（requestAnimationFrameをバイパス）
+    if (isWindows.current && isResizing) {
+      updateImage(image.id, updates);
+      return;
+    }
+
     // 待機中の更新を蓄積
     pendingUpdateRef.current = {
       ...pendingUpdateRef.current,
@@ -260,32 +245,22 @@ const DraggableImage: React.FC<DraggableImageProps> = ({
 
     rafIdRef.current = requestAnimationFrame(() => {
       const now = performance.now();
-      const targetFrameTime = performanceStatsRef.current.targetFrameTime;
+      const targetFrameTime = windowsOptimization.current.targetFrameTime;
       
-      // 動的フレームレート制限
-      if (now - lastUpdateTimeRef.current >= targetFrameTime) {
+      // フレームレート制限（Windowsでは緩和）
+      if (now - lastUpdateTimeRef.current >= targetFrameTime || isWindows.current) {
         if (pendingUpdateRef.current) {
           updateImage(image.id, pendingUpdateRef.current);
           pendingUpdateRef.current = null;
           lastUpdateTimeRef.current = now;
-          
-          // パフォーマンス測定（実際の更新時間）
-          const frameTime = now - lastUpdateTimeRef.current + targetFrameTime;
-          measurePerformance(frameTime);
         }
       } else {
         // まだ間隔が足りない場合は再度予約
         rafIdRef.current = requestAnimationFrame(() => {
           if (pendingUpdateRef.current) {
-            const updateStartTime = performance.now();
             updateImage(image.id, pendingUpdateRef.current);
             pendingUpdateRef.current = null;
-            const updateEndTime = performance.now();
-            lastUpdateTimeRef.current = updateEndTime;
-            
-            // パフォーマンス測定
-            const frameTime = updateEndTime - updateStartTime;
-            measurePerformance(frameTime);
+            lastUpdateTimeRef.current = performance.now();
           }
           rafIdRef.current = null;
         });
@@ -294,7 +269,7 @@ const DraggableImage: React.FC<DraggableImageProps> = ({
       
       rafIdRef.current = null;
     });
-  }, [updateImage, image.id, measurePerformance]);
+  }, [updateImage, image.id, isResizing, dragMode]);
 
   // ドラッグ中
   const handleMouseMove = useCallback(
@@ -343,7 +318,7 @@ const DraggableImage: React.FC<DraggableImageProps> = ({
     ]
   );
 
-  // リサイズ処理（座標計算を修正）
+  // Windows向けに最適化されたリサイズ処理
   const handleResize = useCallback(
     (e: MouseEvent) => {
       if (!resizeStart) return;
@@ -357,93 +332,209 @@ const DraggableImage: React.FC<DraggableImageProps> = ({
       let newX = resizeStart.imgX; // 開始時のX座標を使用
       let newY = resizeStart.imgY; // 開始時のY座標を使用
 
-      const aspectRatio = image.originalWidth / image.originalHeight;
-      const isAspectLocked = image.aspectRatioLocked && !e.shiftKey;
-      const bounds = getCanvasBounds();
+      // Windows環境でのフリーモード専用の超軽量処理
+      if (isWindows.current && dragMode === 'free') {
+        // 最低限のリサイズ計算のみ、他の処理は一切省略
+        switch (resizeStart.handle) {
+          case 'se': // 右下角
+            newWidth = Math.max(50, resizeStart.width + deltaX);
+            newHeight = Math.max(50, resizeStart.height + deltaY);
+            break;
+          case 'sw': // 左下角
+            newWidth = Math.max(50, resizeStart.width - deltaX);
+            newHeight = Math.max(50, resizeStart.height + deltaY);
+            newX = resizeStart.imgX + (resizeStart.width - newWidth);
+            break;
+          case 'ne': // 右上角
+            newWidth = Math.max(50, resizeStart.width + deltaX);
+            newHeight = Math.max(50, resizeStart.height - deltaY);
+            newY = resizeStart.imgY + (resizeStart.height - newHeight);
+            break;
+          case 'nw': // 左上角
+            newWidth = Math.max(50, resizeStart.width - deltaX);
+            newHeight = Math.max(50, resizeStart.height - deltaY);
+            newX = resizeStart.imgX + (resizeStart.width - newWidth);
+            newY = resizeStart.imgY + (resizeStart.height - newHeight);
+            break;
+        }
 
-      // 各ハンドルの処理（開始時の座標を基準に計算）
-      switch (resizeStart.handle) {
-        case 'se': // 右下角 - 位置変更なし
-          newWidth = Math.max(50, resizeStart.width + deltaX);
-          newHeight = Math.max(50, resizeStart.height + deltaY);
-          // newX, newYは変更なし
-          break;
-          
-        case 'sw': // 左下角 - X座標が変更される
-          newWidth = Math.max(50, resizeStart.width - deltaX);
-          newHeight = Math.max(50, resizeStart.height + deltaY);
-          newX = resizeStart.imgX + (resizeStart.width - newWidth);
-          // newYは変更なし
-          break;
-          
-        case 'ne': // 右上角 - Y座標が変更される
-          newWidth = Math.max(50, resizeStart.width + deltaX);
-          newHeight = Math.max(50, resizeStart.height - deltaY);
-          // newXは変更なし
-          newY = resizeStart.imgY + (resizeStart.height - newHeight);
-          break;
-          
-        case 'nw': // 左上角 - X, Y座標両方が変更される
-          newWidth = Math.max(50, resizeStart.width - deltaX);
-          newHeight = Math.max(50, resizeStart.height - deltaY);
-          newX = resizeStart.imgX + (resizeStart.width - newWidth);
-          newY = resizeStart.imgY + (resizeStart.height - newHeight);
-          break;
-      }
-
-      // アスペクト比維持の処理（座標補正を含む）
-      if (isAspectLocked) {
-        const currentRatio = newWidth / newHeight;
-        
-        if (currentRatio > aspectRatio) {
-          // 幅が大きすぎる場合、幅を縮小
-          const adjustedWidth = newHeight * aspectRatio;
-          const widthDiff = newWidth - adjustedWidth;
-          newWidth = adjustedWidth;
-          
-          // 左側のハンドルの場合、X座標を調整
-          if (resizeStart.handle === 'sw' || resizeStart.handle === 'nw') {
-            newX += widthDiff;
-          }
-        } else if (currentRatio < aspectRatio) {
-          // 高さが大きすぎる場合、高さを縮小
-          const adjustedHeight = newWidth / aspectRatio;
-          const heightDiff = newHeight - adjustedHeight;
-          newHeight = adjustedHeight;
-          
-          // 上側のハンドルの場合、Y座標を調整
-          if (resizeStart.handle === 'ne' || resizeStart.handle === 'nw') {
-            newY += heightDiff;
+        // アスペクト比維持（超簡素版）
+        if (image.aspectRatioLocked && !e.shiftKey) {
+          const aspectRatio = image.originalWidth / image.originalHeight;
+          const currentRatio = newWidth / newHeight;
+          if (currentRatio > aspectRatio) {
+            newWidth = newHeight * aspectRatio;
+          } else {
+            newHeight = newWidth / aspectRatio;
           }
         }
+
+        // 最低限の境界制限のみ（Canvas境界取得も省略）
+        newX = Math.max(0, newX);
+        newY = Math.max(0, newY);
+        newWidth = Math.max(50, newWidth);
+        newHeight = Math.max(50, newHeight);
+
+        // 最適化されたupdate関数を使用
+        optimizedUpdateImage({
+          x: newX,
+          y: newY,
+          width: newWidth,
+          height: newHeight,
+        });
+
+        // Windows環境でのパフォーマンス情報（リサイズ中の更新ごと）
+        if (isWindows.current && dragMode === 'free') {
+          // フリーモード専用の軽量ログ（更新頻度を制限）
+          if (Math.random() < 0.1) { // 10%の確率でログ出力（パフォーマンス重視）
+            console.log('[Windows-Free] リサイズ中:', {
+              handle: resizeStart.handle,
+              size: { width: newWidth, height: newHeight },
+              position: { x: newX, y: newY }
+            });
+          }
+        }
+        return;
       }
 
-      // 境界制限の適用（座標とサイズを同時に調整）
-      // 最小位置制限
-      if (newX < 0) {
-        newWidth = newWidth + newX; // 左にはみ出た分、幅を縮小
-        newX = 0;
-      }
-      if (newY < 0) {
-        newHeight = newHeight + newY; // 上にはみ出た分、高さを縮小
-        newY = 0;
-      }
-      
-      // 最大位置制限
-      if (newX + newWidth > bounds.width) {
-        newWidth = bounds.width - newX;
-      }
-      if (newY + newHeight > bounds.height) {
-        newHeight = bounds.height - newY;
+      // Windows向け簡素化された計算
+      if (windowsOptimization.current.useSimplifiedResize) {
+        // 基本的なリサイズ計算のみ実行
+        switch (resizeStart.handle) {
+          case 'se': // 右下角 - 位置変更なし
+            newWidth = Math.max(50, resizeStart.width + deltaX);
+            newHeight = Math.max(50, resizeStart.height + deltaY);
+            break;
+            
+          case 'sw': // 左下角 - X座標が変更される
+            newWidth = Math.max(50, resizeStart.width - deltaX);
+            newHeight = Math.max(50, resizeStart.height + deltaY);
+            newX = resizeStart.imgX + (resizeStart.width - newWidth);
+            break;
+            
+          case 'ne': // 右上角 - Y座標が変更される
+            newWidth = Math.max(50, resizeStart.width + deltaX);
+            newHeight = Math.max(50, resizeStart.height - deltaY);
+            newY = resizeStart.imgY + (resizeStart.height - newHeight);
+            break;
+            
+          case 'nw': // 左上角 - X, Y座標両方が変更される
+            newWidth = Math.max(50, resizeStart.width - deltaX);
+            newHeight = Math.max(50, resizeStart.height - deltaY);
+            newX = resizeStart.imgX + (resizeStart.width - newWidth);
+            newY = resizeStart.imgY + (resizeStart.height - newHeight);
+            break;
+        }
+
+        // 簡素化されたアスペクト比維持（Windowsのみ、複雑な座標調整を省略）
+        if (image.aspectRatioLocked && !e.shiftKey) {
+          const aspectRatio = image.originalWidth / image.originalHeight;
+          const currentRatio = newWidth / newHeight;
+          
+          if (currentRatio > aspectRatio) {
+            newWidth = newHeight * aspectRatio;
+          } else {
+            newHeight = newWidth / aspectRatio;
+          }
+        }
+
+        // 簡素化された境界制限
+        const bounds = getCanvasBounds();
+        newX = Math.max(0, Math.min(bounds.width - newWidth, newX));
+        newY = Math.max(0, Math.min(bounds.height - newHeight, newY));
+        newWidth = Math.max(50, Math.min(bounds.width - newX, newWidth));
+        newHeight = Math.max(50, Math.min(bounds.height - newY, newHeight));
+
+      } else {
+        // 従来の完全な計算（macOS等）
+        const aspectRatio = image.originalWidth / image.originalHeight;
+        const isAspectLocked = image.aspectRatioLocked && !e.shiftKey;
+        const bounds = getCanvasBounds();
+
+        // 各ハンドルの処理（開始時の座標を基準に計算）
+        switch (resizeStart.handle) {
+          case 'se': // 右下角 - 位置変更なし
+            newWidth = Math.max(50, resizeStart.width + deltaX);
+            newHeight = Math.max(50, resizeStart.height + deltaY);
+            // newX, newYは変更なし
+            break;
+            
+          case 'sw': // 左下角 - X座標が変更される
+            newWidth = Math.max(50, resizeStart.width - deltaX);
+            newHeight = Math.max(50, resizeStart.height + deltaY);
+            newX = resizeStart.imgX + (resizeStart.width - newWidth);
+            // newYは変更なし
+            break;
+            
+          case 'ne': // 右上角 - Y座標が変更される
+            newWidth = Math.max(50, resizeStart.width + deltaX);
+            newHeight = Math.max(50, resizeStart.height - deltaY);
+            // newXは変更なし
+            newY = resizeStart.imgY + (resizeStart.height - newHeight);
+            break;
+            
+          case 'nw': // 左上角 - X, Y座標両方が変更される
+            newWidth = Math.max(50, resizeStart.width - deltaX);
+            newHeight = Math.max(50, resizeStart.height - deltaY);
+            newX = resizeStart.imgX + (resizeStart.width - newWidth);
+            newY = resizeStart.imgY + (resizeStart.height - newHeight);
+            break;
+        }
+
+        // アスペクト比維持の処理（座標補正を含む）
+        if (isAspectLocked) {
+          const currentRatio = newWidth / newHeight;
+          
+          if (currentRatio > aspectRatio) {
+            // 幅が大きすぎる場合、幅を縮小
+            const adjustedWidth = newHeight * aspectRatio;
+            const widthDiff = newWidth - adjustedWidth;
+            newWidth = adjustedWidth;
+            
+            // 左側のハンドルの場合、X座標を調整
+            if (resizeStart.handle === 'sw' || resizeStart.handle === 'nw') {
+              newX += widthDiff;
+            }
+          } else if (currentRatio < aspectRatio) {
+            // 高さが大きすぎる場合、高さを縮小
+            const adjustedHeight = newWidth / aspectRatio;
+            const heightDiff = newHeight - adjustedHeight;
+            newHeight = adjustedHeight;
+            
+            // 上側のハンドルの場合、Y座標を調整
+            if (resizeStart.handle === 'ne' || resizeStart.handle === 'nw') {
+              newY += heightDiff;
+            }
+          }
+        }
+
+        // 境界制限の適用（座標とサイズを同時に調整）
+        // 最小位置制限
+        if (newX < 0) {
+          newWidth = newWidth + newX; // 左にはみ出た分、幅を縮小
+          newX = 0;
+        }
+        if (newY < 0) {
+          newHeight = newHeight + newY; // 上にはみ出た分、高さを縮小
+          newY = 0;
+        }
+        
+        // 最大位置制限
+        if (newX + newWidth > bounds.width) {
+          newWidth = bounds.width - newX;
+        }
+        if (newY + newHeight > bounds.height) {
+          newHeight = bounds.height - newY;
+        }
+
+        // 最小サイズを再度確保（境界制限で小さくなりすぎた場合）
+        newWidth = Math.max(50, newWidth);
+        newHeight = Math.max(50, newHeight);
       }
 
-      // 最小サイズを再度確保（境界制限で小さくなりすぎた場合）
-      newWidth = Math.max(50, newWidth);
-      newHeight = Math.max(50, newHeight);
-
-      // グリッドスナップモードの場合はスナップを適用
+      // グリッドスナップモードの場合はスナップを適用（Windows向け簡素化）
       if (dragMode === 'grid-snap') {
-        const gridSize = 22;
+        const gridSize = windowsOptimization.current.useSimplifiedResize ? 44 : 22; // Windowsでは大きめのグリッド
         newX = snapToGrid(newX, gridSize);
         newY = snapToGrid(newY, gridSize);
         newWidth = snapToGrid(newWidth, gridSize);
@@ -458,7 +549,7 @@ const DraggableImage: React.FC<DraggableImageProps> = ({
         height: newHeight,
       });
     },
-    [resizeStart, image.originalWidth, image.originalHeight, image.aspectRatioLocked, optimizedUpdateImage, getCanvasBounds, dragMode, snapToGrid]
+    [resizeStart, image.originalWidth, image.originalHeight, image.aspectRatioLocked, optimizedUpdateImage, getCanvasBounds, dragMode, snapToGrid, isWindows]
   );
 
   // ドラッグ終了
@@ -508,6 +599,25 @@ const DraggableImage: React.FC<DraggableImageProps> = ({
             description: '画像をリサイズ',
           },
         });
+        
+        // Windows環境でのパフォーマンス情報
+        if (isWindows.current) {
+          console.log('[Windows最適化] リサイズ完了:', {
+            handle: resizeStart.handle,
+            originalSize: { width: resizeStart.width, height: resizeStart.height },
+            newSize: { width: image.width, height: image.height },
+            deltaSize: { width: deltaWidth, height: deltaHeight },
+            dragMode,
+            isFreeModeOptimized: dragMode === 'free',
+            optimization: windowsOptimization.current
+          });
+          
+          // フリーモード専用のパフォーマンス測定終了
+          if (dragMode === 'free') {
+            console.timeEnd('[Windows-Free] リサイズパフォーマンス');
+            console.log('[Windows-Free] 超軽量最適化が適用されました');
+          }
+        }
       }
     }
 
@@ -547,24 +657,43 @@ const DraggableImage: React.FC<DraggableImageProps> = ({
     setResizeStart(null);
   }, [isDragging, isResizing, dragStart, resizeStart, image.x, image.y, image.width, image.height, dispatch, updateImage, image.id, dragMode, snapToGrid]);
 
-  // リサイズハンドルのマウスダウン（座標記録を修正）
+  // リサイズハンドルの開始
   const handleResizeMouseDown = useCallback(
     (e: React.MouseEvent, handle: ResizeHandle) => {
       e.preventDefault();
       e.stopPropagation();
 
+      selectImage(image.id);
       setIsResizing(true);
       setResizeStart({
         x: e.clientX,
         y: e.clientY,
-        imgX: image.x, // 画像の開始X座標を記録
-        imgY: image.y, // 画像の開始Y座標を記録
+        imgX: image.x,
+        imgY: image.y,
         width: image.width,
         height: image.height,
         handle,
       });
+
+      // Windows環境でのデバッグ情報
+      if (isWindows.current) {
+        console.log('[Windows最適化] リサイズ開始:', {
+          handle,
+          dragMode,
+          isFreeModeOptimized: dragMode === 'free',
+          optimization: windowsOptimization.current,
+          imageSize: { width: image.width, height: image.height },
+          position: { x: image.x, y: image.y },
+          renderingMode: dragMode === 'free' ? 'ultra-lightweight' : 'simplified'
+        });
+        
+        // フリーモード専用のパフォーマンス測定開始
+        if (dragMode === 'free') {
+          console.time('[Windows-Free] リサイズパフォーマンス');
+        }
+      }
     },
-    [image.x, image.y, image.width, image.height]
+    [selectImage, image.id, image.x, image.y, image.width, image.height, dragMode]
   );
 
   // 右クリックメニュー
@@ -680,13 +809,27 @@ const DraggableImage: React.FC<DraggableImageProps> = ({
       <div
         ref={imageRef}
         className={`absolute select-none ${
-          (isDragging && dragMode === 'free') || isTransitioning ? '' : 'transition-all duration-75'
+          // Windows環境のフリーモードリサイズ中はtransitionを完全に無効化
+          (isDragging && dragMode === 'free') || isTransitioning || (isWindows.current && isResizing && dragMode === 'free') ? '' : 'transition-all duration-75'
+        } ${
+          // Windows環境のフリーモードリサイズ中は超軽量CSSクラスを適用
+          isWindows.current && isResizing && dragMode === 'free' ? 'windows-free-resize' : ''
         } ${
           isSelected ? 'ring-2 ring-blue-500 ring-offset-2' : ''
         } ${isDragging ? 'z-50' : ''}`}
         style={{
-          ...(dragMode === 'free' && (isDragging || isTransitioning) ? {
-            // フリーモード時はGPU加速のためtransformを使用
+          // Windows環境のフリーモードリサイズ中は完全に直接制御
+          ...(isWindows.current && isResizing && dragMode === 'free' ? {
+            // Windows + フリーモード + リサイズ中: 最軽量設定
+            left: image.x,
+            top: image.y,
+            transform: 'none',
+            willChange: 'auto',
+            transition: 'none',
+            isolation: 'auto',
+            containIntrinsicSize: 'none',
+          } : dragMode === 'free' && (isDragging || isTransitioning) && !(isWindows.current && isResizing) ? {
+            // フリーモード時でWindows環境でリサイズ中でない場合のみGPU加速のためtransformを使用
             // left/topを0に固定してtransformのみで位置制御
             left: 0,
             top: 0,
@@ -699,10 +842,17 @@ const DraggableImage: React.FC<DraggableImageProps> = ({
               transition: 'transform 0.1s ease-out',
             } : {}),
           } : {
-            // 通常時はleft/topを使用（transformは無効化）
+            // 通常時またはWindows環境でのリサイズ中はleft/topを使用（transformは無効化）
             left: image.x,
             top: image.y,
             transform: 'none',
+            // Windows環境でのリサイズ中はwillChangeを無効化してレンダリング負荷を軽減
+            ...(isWindows.current && isResizing ? {
+              willChange: 'auto',
+              // Windows環境向けの追加最適化
+              isolation: 'auto',
+              containIntrinsicSize: 'none',
+            } : {}),
           }),
           width: image.width,
           height: image.height,
@@ -728,9 +878,22 @@ const DraggableImage: React.FC<DraggableImageProps> = ({
           ref={imgElementRef}
           src={image.src}
           alt={`画像 ${image.id}`}
-          className="w-full h-full object-cover rounded shadow-lg"
+          className={`w-full h-full object-cover rounded shadow-lg ${
+            isWindows.current && isResizing ? 'image-rendering-speed' : ''
+          }`}
           draggable={false}
-          style={{ opacity: image.opacity ?? 1 }}
+          style={{
+            opacity: image.opacity ?? 1,
+            // Windows環境のフリーモードリサイズ中は画像レンダリングも最適化
+            ...(isWindows.current && isResizing && dragMode === 'free' ? {
+              transformOrigin: 'top left',
+              willChange: 'auto',
+              // スムーズなリサイズのためのヒント
+              imageRendering: 'auto', // 速度重視から品質重視に変更
+            } : isWindows.current && isResizing ? {
+              transformOrigin: 'top left',
+            } : {}),
+          }}
         />
 
         {/* ホバー時のツールバー */}
